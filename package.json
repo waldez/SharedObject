@@ -1,0 +1,15 @@
+{
+  "name": "SharedObject",
+  "version": "1.0.0",
+  "description": "",
+  "main": "SharedObject.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "author": "Tomas Waldauf <tomas.waldauf@gmail.com>",
+  "dependencies": {
+    "bluebird": "^3.5.1",
+    "redis": "^2.8.0",
+    "uuid": "^3.3.2"
+  }
+}
