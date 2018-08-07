@@ -56,6 +56,7 @@ class SharedObject extends EventEmitter {
                 const foundLock = this[LOCKS].get(notification.key);
                 if (foundLock) {
                     foundLock.resolve({ result: 'unlocked' });
+                    this[LOCKS].delete(notification.key);
                 }
             }
 
@@ -111,8 +112,6 @@ class SharedObject extends EventEmitter {
         }
 
         const raw = JSON.stringify(Object.assign({}, options, additional));
-        // const newChain = options.ttl ? chain.setnx(fullKey, raw, 'EX', options.ttl) : chain.set(fullKey, raw);
-        // const newChain = chain.setnx(fullKey, raw, 'EX', options.ttl || 1);
         const newChain = chain.set(fullKey, raw, 'NX', 'EX', options.ttl);
         const lock = {
             unlock: async result => {
@@ -156,7 +155,6 @@ class SharedObject extends EventEmitter {
     async save(key, value, options = {}) {
 
         const raw = JSON.stringify(value);
-        // const fullKey = this[FULLNAME] + ':' + key;
         const fullKey = this.buildKey(key);
         const fullLockKey = this.buildLockKey(key);
         const { lock } = options;
@@ -167,18 +165,11 @@ class SharedObject extends EventEmitter {
             const rawLock = await this.redisClient.getAsync(fullLockKey);
 
             if (rawLock) {
-                console.log(`!W! - ===================== lock =====================\n`);
-                console.log('!W! - rawLock:', rawLock);
-
                 const lockData = JSON.parse(rawLock);
                 lockData.expire = new Date(lockData.expire);
 
                 const timeSpan = lockData.expire - new Date();
-
-                const lock = {
-                    options: lockData
-                };
-
+                const lock = { options: lockData };
                 const lockPromise = timeSpan > 0 ? new Promise((resolve, reject) => {
 
                     lock.locked = true;
@@ -205,9 +196,7 @@ class SharedObject extends EventEmitter {
                 }) : Promise.reject({ result: 'timeout' });
 
                 lock.promise = lockPromise;
-
-                console.log(`!W! - before discard`);
-
+                this[LOCKS].set(key, lock);
                 // UNwatch
                 this.redisClient.multi().discard();
 
@@ -251,45 +240,6 @@ class SharedObject extends EventEmitter {
             console.log(`!W! - ===================== watch error =====================\n`);
             console.log('!W! - watchError:', watchError);
         }
-
-        // let setChain = this.redisClient.multi().set(fullKey, raw);
-        // // if there is not lock set from user, just try to set lock with 0 ttl and NX property, to see
-        // // if this property has been locked (see more at: https://redis.io/commands/set)
-        // // let [newChain, lockInstance] = this.lock(setChain, key, lock || { ttl: 0 });
-        // let [newChain, lockInstance] = this.lock(setChain, key, lock);
-        // // if (lock) {
-        // //     var [newChain, lockInstance] = this.lock(setChain, key, lock);
-        // // }
-        
-        // // update the chain
-        // setChain = newChain;
-
-        // if (!this[META].props[key]) {
-        //     var newMeta = Object.assign({}, this[META]);
-        //     newMeta.props = Object.assign({}, this[META].props, { [key]: this[UUID] });
-        //     setChain = setChain.set(this[FULLNAME] + ':' + META_KEY, JSON.stringify(newMeta));
-        // }
-
-        // try {
-        //     const result = await setChain.execAsync();
-        //     if (newMeta) {
-        //         this[META] = newMeta;
-        //         await this.notify({
-        //             type: 'change',
-        //             key: META_KEY,
-        //             value: newMeta
-        //         });
-        //     }
-
-        //     return {
-        //         result,
-        //         lock: lockInstance
-        //     }
-        // } catch(error) {
-        //     console.log(`!W! - ===================== save error =====================\n`);
-        //     console.log('!W! - error:', error);
-        // }
-
     }
 
     async destroy() {
