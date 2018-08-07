@@ -55,7 +55,7 @@ class SharedObject extends EventEmitter {
             if (notification.type === 'unlock') {
                 const foundLock = this[LOCKS].get(notification.key);
                 if (foundLock) {
-                    foundLock.resolve({ result: 'unlocked' });
+                    foundLock.resolve('unlocked');
                     this[LOCKS].delete(notification.key);
                 }
             }
@@ -119,6 +119,8 @@ class SharedObject extends EventEmitter {
                     // already expired, nothing left to do
                     return;
                 } else {
+                    // TODO: should I add random number for each lock instance?
+                    // Q: could happend, that I'll delete the lock from next command?
                     const delResult = await this.redisClient.delAsync(fullKey);
                     return this.notify({
                         type: 'unlock',
@@ -163,7 +165,6 @@ class SharedObject extends EventEmitter {
         try {
             const watchResult = await this.redisClient.watchAsync(fullKey, fullLockKey);
             const rawLock = await this.redisClient.getAsync(fullLockKey);
-
             if (rawLock) {
                 const lockData = JSON.parse(rawLock);
                 lockData.expire = new Date(lockData.expire);
@@ -198,22 +199,18 @@ class SharedObject extends EventEmitter {
                 lock.promise = lockPromise;
                 this[LOCKS].set(key, lock);
                 // UNwatch
-                this.redisClient.multi().discard();
-
+                await this.redisClient.unwatchAsync();
                 return {
                     result: 'locked',
                     locked: lock
                 }
             } else {
-
                 let setChain = this.redisClient.multi().set(fullKey, raw);
-                // if there is not lock set from user, just try to set lock with 0 ttl and NX property, to see
-                // if this property has been locked (see more at: https://redis.io/commands/set)
-                // let [newChain, lockInstance] = this.lock(setChain, key, lock || { ttl: 0 });
-                let [newChain, lockInstance] = this.lock(setChain, key, lock);
-                
-                // update the chain
-                setChain = newChain;
+                if (lock) {
+                    var [newChain, lockInstance] = this.lock(setChain, key, lock);
+                    // update the chain
+                    setChain = newChain;
+                }
 
                 if (!this[META].props[key]) {
                     var newMeta = Object.assign({}, this[META]);
