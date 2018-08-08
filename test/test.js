@@ -82,8 +82,45 @@ describe('SharedObjct build on Redis', function() {
             expect(loadResult).to.equal(undefined);
         });
 
-        xit('should do it', async function() {
+        it('should save with lock and unlock afterwards', async function() {
 
+            const firstSaveResult = await so1.save('key1', 'first value with lock', { lock: { ttl: 2 } });
+            expect(firstSaveResult.lock, `Key 'key1' should be locked`).to.exist;
+            
+            const unlockResult = await firstSaveResult.lock.unlock('succesfully unlocked');
+            expect(unlockResult).to.equal(true);
+        });
+
+        it('should save with lock, fail second save, first save value should be still set', async function() {
+
+            const firstSaveResult = await so1.save('key1', 'first value with lock', { lock: { ttl: 2 } });
+            expect(firstSaveResult.lock, `Key 'key1' should be locked`).to.exist;
+            
+            const { result, locked } = await so1.save('key1', 'second value save should fail');
+            expect(result).to.equal('locked');
+            expect(locked, `'locked' property shoud exist`).to.exist;
+
+            locked.promise.then(lockResult => {
+                expect(lockResult).to.deep.equal({ result: 'unlocked' });
+            });
+
+            const loadResult = await so1.load('key1');
+            expect(loadResult).to.equal('first value with lock');
+
+            const unlockResult = await firstSaveResult.lock.unlock('succesfully unlocked');
+            expect(unlockResult).to.equal(true);
+        });
+        
+        it('should save with lock, the lock should timeout', async function() {
+
+            const firstSaveResult = await so1.save('key1', 'first value with lock', { lock: { ttl: 1 } });
+            const secondSaveResult = await so1.save('key1', 'second value save should fail');
+            
+            try {
+                await secondSaveResult.locked.promise;
+            } catch(lockError) {
+                expect(lockError).to.deep.equal({ result: 'timeout' });
+            }
         });
     });
 
