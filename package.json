@@ -4,12 +4,17 @@
   "description": "",
   "main": "SharedObject.js",
   "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1"
+    "test": "mocha test --timeout ${MOCHA_TIMEOUT=10000} test/test.js"
   },
   "author": "Tomas Waldauf <tomas.waldauf@gmail.com>",
   "dependencies": {
     "bluebird": "^3.5.1",
     "redis": "^2.8.0",
     "uuid": "^3.3.2"
+  },
+  "devDependencies": {
+    "chai": "^3.5.0",
+    "chai-exclude": "^1.0.8",
+    "mocha": "^2.4.5"
   }
 }

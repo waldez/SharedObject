@@ -95,8 +95,8 @@ class SharedObject extends EventEmitter {
 
     onNotification(notification) {
 
-        console.log(`!W! - ===================== NOTIFICATION =====================\n`);
-        console.log('!W! - notification:', notification);
+        // console.log(`!W! - ===================== NOTIFICATION =====================\n`);
+        // console.log('!W! - notification:', notification);
     }
 
     lock(chain, key, options = {}) {
@@ -239,14 +239,13 @@ class SharedObject extends EventEmitter {
         }
     }
 
-    async destroy() {
+    async clear() {
 
         const keys = await this.redisClient.keysAsync(this[FULLNAME] + ':*');
-        await this.redisClient.del(keys);
+        if (keys && keys.length) {
+            return this.redisClient.delAsync(keys);
+        }
         // TODO: send notification!
-        
-        // this.redisClient.quit();
-        // this.redisClientSub.quit();
     }
 
     async load(key) {
