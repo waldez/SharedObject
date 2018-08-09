@@ -10,6 +10,8 @@ const META = Symbol('meta');
 const META_KEY = 'λ';
 const FULLNAME = Symbol('fullname');
 const LOCKS = Symbol('locks');
+const LOCK_RESOLVE = Symbol('lockResolve');
+const LOCK_TIMER = Symbol('lockTimer');
 const SUB_CHANNEL = 'SO:service';
 
 class SharedObject extends EventEmitter {
@@ -55,7 +57,7 @@ class SharedObject extends EventEmitter {
             if (notification.type === 'unlock') {
                 const foundLock = this[LOCKS].get(notification.key);
                 if (foundLock) {
-                    foundLock.resolve('unlocked');
+                    foundLock[LOCK_RESOLVE]('unlocked');
                     this[LOCKS].delete(notification.key);
                 }
             }
@@ -174,31 +176,24 @@ class SharedObject extends EventEmitter {
                 const lockPromise = timeSpan > 0 ? new Promise((resolve, reject) => {
 
                     lock.locked = true;
-                    // TODO: module private
-                    lock.timer = setTimeout(() => {
-                        reject({ result: 'timeout' });
+                    lock[LOCK_TIMER] = setTimeout(() => {
+                        resolve({ result: 'timeout' });
                         lock.locked = false;
-                        // TODO: module private
-                        lock.resolve = ()=>{};
-                        // TODO: module private
-                        lock.reject = ()=>{};
+                        lock[LOCK_RESOLVE] = ()=>{};
                     }, timeSpan + SPAN_TRESHOLD);
 
-                    lock.resolve = result => {
-                        clearTimeout(lock.timer);
-                        lock.timer = null;
-                        // TODO: module private
-                        lock.resolve = ()=>{};
-                        // TODO: module private
-                        lock.reject = ()=>{};
+                    lock[LOCK_RESOLVE] = result => {
+                        clearTimeout(lock[LOCK_TIMER]);
+                        lock[LOCK_TIMER] = null;
+                        locklock[LOCK_RESOLVE] = ()=>{};
                         resolve({ result });
                     }
 
-                }) : Promise.reject({ result: 'timeout' });
+                }) : Promise.resolve({ result: 'timeout' });
 
                 lock.promise = lockPromise;
                 this[LOCKS].set(key, lock);
-                // UNwatch
+                // unwatch
                 await this.redisClient.unwatchAsync();
                 return {
                     result: 'locked',
@@ -233,9 +228,11 @@ class SharedObject extends EventEmitter {
                     lock: lockInstance
                 }
             }
-        } catch(watchError) {
+        } catch (watchError) {
+            // TODO: just for debuging
             console.log(`!W! - ===================== watch error =====================\n`);
             console.log('!W! - watchError:', watchError);
+            throw watchError;
         }
     }
 

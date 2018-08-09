@@ -7,6 +7,11 @@ const expect = require('chai').expect;
 // this we will test!
 const SharedObject = require('../SharedObject');
 
+function wait(delay) {
+    
+    return new Promise(resolve => setTimeout(resolve, delay));
+}
+
 function createRemoteSharedObject(name) {
 
     const { fork } = require('child_process');
@@ -59,7 +64,7 @@ describe('SharedObjct build on Redis', function() {
         await Promise.join(so1.readyPromise, remoteSo1.ready());
     });
 
-    describe('Single instace basic functions', function() {
+    describe('Single process basic functions', function() {
         
         it('should save without lock', async function() {
 
@@ -116,11 +121,57 @@ describe('SharedObjct build on Redis', function() {
             const firstSaveResult = await so1.save('key1', 'first value with lock', { lock: { ttl: 1 } });
             const secondSaveResult = await so1.save('key1', 'second value save should fail');
             
+            const lockResult = await secondSaveResult.locked.promise;
+            expect(lockResult).to.deep.equal({ result: 'timeout' });
+        });
+    });
+
+    xdescribe('Remote process SharedObject', function() {
+
+        it('should save without lock', async function() {
+
+            const result = await remoteSo1.save('key1', FOO_JSON);
+            expect(result).to.deep.equal({ result: [ 'OK', 'OK' ] });
+        });
+
+        it('should load expected data', async function() {
+
+            const remoteResult = await remoteSo1.load('key1');
+            expect(remoteResult).to.deep.equal(FOO_JSON);
+
+            const result = await so1.load('key1');
+            expect(result).to.deep.equal(FOO_JSON);
+        });
+
+        it('should fail to save locked data', async function() {
+
+            so1.save('key1', 'value from local save', { lock: { ttl: 2 } })
+                .then(({ result, lock }) => {
+                    
+                    console.log('!W! - LOCAL result:', result);
+                    // TODO:
+                });
+
+            await wait(100);
+
             try {
-                await secondSaveResult.locked.promise;
-            } catch(lockError) {
-                expect(lockError).to.deep.equal({ result: 'timeout' });
+                const remoteSaveResult = await remoteSo1.save('key1', FOO_JSON, { lock: { ttl: 2 } });
+            } catch(error) {
+                console.log('!W! - error:', error);
             }
+
+            console.log('!W! - REMOTE remoteSaveResult:', remoteSaveResult);
+
+            const remoteLoadResult = await remoteSo1.load('key1');
+            expect(remoteLoadResult).to.equal('value from local save');
+
+            // expect(firstSaveResult.lock, `Key 'key1' should be locked`).to.exist;
+
+            // const removeResult = await remoteSo1.load('key1');
+            // expect(removeResult).to.deep.equal(FOO_JSON);
+
+            // const result = await so1.load('key1');
+            // expect(result).to.deep.equal(FOO_JSON);
         });
     });
 
