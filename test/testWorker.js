@@ -6,20 +6,11 @@ const [/*ignore*/, /*ignore*/, sharedObjectName] = process.argv;
 
 const so = new SharedObject(sharedObjectName, null, { redisClient: redis.createClient() });
 
-so.readyPromise.catch(e => { throw e; });
-
 process.on('message', async ({ requestId, action, args }) => {
 
     switch (action) {
-        case 'ready': {
-
-            await so.readyPromise;
-            process.send({ requestId, action, value: true });
-        }
-        break;
 
         case 'kill': {
-
             so.redisClient.quit();
             so.redisClientSub.quit();
             process.send({ requestId, action, value: true });

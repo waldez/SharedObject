@@ -6,14 +6,17 @@ const uuidv1 = require('uuid/v1');
 
 const UUID = Symbol('uuid');
 const VALUE = Symbol('value');
-const META = Symbol('meta');
-const META_KEY = 'λ';
 const FULLNAME = Symbol('fullname');
 const LOCKS = Symbol('locks');
 const LOCK_RESOLVE = Symbol('lockResolve');
 const LOCK_METHOD = Symbol('lockFn');
 const LOCK_TIMER = Symbol('lockTimer');
 const SUB_CHANNEL = 'SO:service';
+const META_KEY = '__META__';
+
+// this is the timespan, which is used for retry of save and also to offset a bit local timeout timer
+const SPAN_TRESHOLD = 50;
+const MAX_SAVE_TRIES = 5;
 
 // Private methods to be bound onto private Symbol property
 /**
@@ -125,21 +128,6 @@ class SharedObject extends EventEmitter {
                 this.emit('notification', notification);
             }
         });
-
-        this.readyPromise = this.loadMeta().catch(error => { throw new Error(error) });
-    }
-
-    async saveMeta() {
-
-        await this.save(META_KEY, this[META]);
-    }
-
-    async loadMeta() {
-
-        this[META] = await this.load(META_KEY);
-        if (!this[META]) {
-            this[META] = { props: {} };
-        }
     }
 
     get fullName() {
@@ -179,8 +167,11 @@ class SharedObject extends EventEmitter {
         const raw = JSON.stringify(value);
         const fullKey = this.buildKey(key);
         const fullLockKey = this.buildLockKey(key);
-        const { lock } = options;
-        const SPAN_TRESHOLD = 50;
+        const { lock, tries = 0 } = options;
+
+        if (tries >= MAX_SAVE_TRIES) {
+            throw new Error('Exceeded maximum number of save tries!');
+        }
 
         try {
             // begin trasaction (watch the key and the lock for this key)
@@ -229,20 +220,15 @@ class SharedObject extends EventEmitter {
                     setChain = newChain;
                 }
 
-                if (!this[META].props[key]) {
-                    var newMeta = Object.assign({}, this[META]);
-                    newMeta.props = Object.assign({}, this[META].props, { [key]: this[UUID] });
-                    setChain = setChain.set(this[FULLNAME] + ':' + META_KEY, JSON.stringify(newMeta));
-                }
-
                 const result = await setChain.execAsync();
-                if (newMeta) {
-                    this[META] = newMeta;
-                    await this.notify({
-                        type: 'change',
-                        key: META_KEY,
-                        value: newMeta
-                    });
+                if (result === null) {
+                    return Promise
+                    .delay(SPAN_TRESHOLD)
+                    .then(this.save.bind(this,
+                        key,
+                        value,
+                        Object.assign(options, { tries: tries + 1 })
+                        ));
                 }
 
                 return {

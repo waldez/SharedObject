@@ -61,7 +61,6 @@ describe('SharedObjct build on Redis', function() {
         const client = redis.createClient();
         remoteSo1 = createRemoteSharedObject(SO1_ID);
         so1 = new SharedObject(SO1_ID, null, { redisClient: client });
-        await Promise.join(so1.readyPromise, remoteSo1.ready());
     });
 
     describe('Single process basic functions', function() {
@@ -69,7 +68,7 @@ describe('SharedObjct build on Redis', function() {
         it('should save without lock', async function() {
 
             const result = await so1.save('key1', FOO_JSON);
-            expect(result).to.deep.equal({ result: [ 'OK', 'OK' ], lock: undefined });
+            expect(result).to.deep.equal({ result: [ 'OK' ], lock: undefined });
         });
 
         it('should load expected data', async function() {
@@ -81,7 +80,7 @@ describe('SharedObjct build on Redis', function() {
         it('should clear shared object', async function() {
 
             const destroyResult = await so1.clear();
-            expect(destroyResult).to.equal(2);
+            expect(destroyResult).to.equal(1);
 
             const loadResult = await so1.load('key1');
             expect(loadResult).to.equal(undefined);
@@ -101,7 +100,7 @@ describe('SharedObjct build on Redis', function() {
             const firstSaveResult = await so1.save('key1', 'first value with lock', { lock: { ttl: 2 } });
             expect(firstSaveResult.lock, `Key 'key1' should be locked`).to.exist;
             
-            const { result, locked } = await so1.save('key1', 'second value save should fail');
+            const { result, locked } = await so1.save('key1', 'second value save should fail', { lock: { ttl: 2 } });
             expect(result).to.equal('locked');
             expect(locked, `'locked' property shoud exist`).to.exist;
 
@@ -126,12 +125,12 @@ describe('SharedObjct build on Redis', function() {
         });
     });
 
-    xdescribe('Remote process SharedObject', function() {
+    describe('Remote process SharedObject', function() {
 
         it('should save without lock', async function() {
 
             const result = await remoteSo1.save('key1', FOO_JSON);
-            expect(result).to.deep.equal({ result: [ 'OK', 'OK' ] });
+            expect(result).to.deep.equal({ result: [ 'OK' ] });
         });
 
         it('should load expected data', async function() {
@@ -145,34 +144,26 @@ describe('SharedObjct build on Redis', function() {
 
         it('should fail to save locked data', async function() {
 
-            so1.save('key1', 'value from local save', { lock: { ttl: 2 } })
-                .then(({ result, lock }) => {
-                    
-                    console.log('!W! - LOCAL result:', result);
-                    // TODO:
+            let localLock;
+            so1.save('key1', 'value from local save', { lock: { ttl: 1 } })
+                .then(({ result, lock, locked }) => {
+                    localLock = lock;
                 });
 
-            await wait(100);
+            // make sure local 'so' will get there first (without this wait, the winner is 50:50)
+            await wait(10);
 
-            try {
-                const remoteSaveResult = await remoteSo1.save('key1', FOO_JSON, { lock: { ttl: 2 } });
-            } catch(error) {
-                console.log('!W! - error:', error);
-            }
-
-            console.log('!W! - REMOTE remoteSaveResult:', remoteSaveResult);
+            const remoteSaveResult = await remoteSo1.save('key1', FOO_JSON, { lock: { ttl: 2 } });
+            expect(remoteSaveResult.locked, `Remote save should result in locked state`).to.exist;
 
             const remoteLoadResult = await remoteSo1.load('key1');
             expect(remoteLoadResult).to.equal('value from local save');
 
-            // expect(firstSaveResult.lock, `Key 'key1' should be locked`).to.exist;
+            expect(localLock, `'localLock' should exist`).to.exist;
 
-            // const removeResult = await remoteSo1.load('key1');
-            // expect(removeResult).to.deep.equal(FOO_JSON);
-
-            // const result = await so1.load('key1');
-            // expect(result).to.deep.equal(FOO_JSON);
-        });
+            const unlockResult = await localLock.unlock('succesfully unlocked');
+            expect(unlockResult).to.equal(true);
+        }).timeout(5000);
     });
 
     after(async function() {
