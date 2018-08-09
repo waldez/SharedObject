@@ -173,74 +173,67 @@ class SharedObject extends EventEmitter {
             throw new Error('Exceeded maximum number of save tries!');
         }
 
-        try {
-            // begin trasaction (watch the key and the lock for this key)
-            const watchResult = await this.redisClient.watchAsync(fullKey, fullLockKey);
-            const rawLock = await this.redisClient.getAsync(fullLockKey);
-            if (rawLock) {
-                const lockData = JSON.parse(rawLock);
-                lockData.expire = new Date(lockData.expire);
+        // begin trasaction (watch the key and the lock for this key)
+        const watchResult = await this.redisClient.watchAsync(fullKey, fullLockKey);
+        const rawLock = await this.redisClient.getAsync(fullLockKey);
+        if (rawLock) {
+            const lockData = JSON.parse(rawLock);
+            lockData.expire = new Date(lockData.expire);
 
-                const timeSpan = lockData.expire - new Date();
-                const lock = {
-                    options: lockData,
-                    locked: false // the lock could be already expired, so the default is false
-                };
-                const lockPromise = timeSpan > 0 ?
-                    // there is still time to live
-                    new Promise((resolve/*, reject*/) => {
-                        lock.locked = true;
-                        lock[LOCK_RESOLVE] = result => {
-                            lock.locked = false;
-                            resolve({ result });
-                        }
-                    }).timeout(timeSpan + SPAN_TRESHOLD)
-                        .catch(Promise.TimeoutError, timeoutError => {
-                            lock.locked = false;
-                            return Promise.resolve({ result: 'timeout' });
-                        }) :
-                    // the time has already expired
-                    Promise.resolve({ result: 'timeout' });
+            const timeSpan = lockData.expire - new Date();
+            const lock = {
+                options: lockData,
+                locked: false // the lock could be already expired, so the default is false
+            };
+            const lockPromise = timeSpan > 0 ?
+                // there is still time to live
+                new Promise((resolve/*, reject*/) => {
+                    lock.locked = true;
+                    lock[LOCK_RESOLVE] = result => {
+                        lock.locked = false;
+                        resolve({ result });
+                    }
+                }).timeout(timeSpan + SPAN_TRESHOLD)
+                    .catch(Promise.TimeoutError, timeoutError => {
+                        lock.locked = false;
+                        return Promise.resolve({ result: 'timeout' });
+                    }) :
+                // the time has already expired
+                Promise.resolve({ result: 'timeout' });
 
-                lock.promise = lockPromise;
-                if (lock.locked) {
-                    this[LOCKS].set(key, lock);
-                }
-                // discard the transaction, because there was a lock - unwatch those key and lock
-                await this.redisClient.unwatchAsync();
-                return {
-                    result: 'locked',
-                    locked: lock
-                }
-            } else {
-                let setChain = this.redisClient.multi().set(fullKey, raw);
-                if (lock) {
-                    var [newChain, lockInstance] = this[LOCK_METHOD](setChain, key, lock);
-                    // update the chain
-                    setChain = newChain;
-                }
-
-                const result = await setChain.execAsync();
-                if (result === null) {
-                    return Promise
-                    .delay(SPAN_TRESHOLD)
-                    .then(this.save.bind(this,
-                        key,
-                        value,
-                        Object.assign(options, { tries: tries + 1 })
-                        ));
-                }
-
-                return {
-                    result,
-                    lock: lockInstance
-                }
+            lock.promise = lockPromise;
+            if (lock.locked) {
+                this[LOCKS].set(key, lock);
             }
-        } catch (watchError) {
-            // TODO: just for debuging
-            console.log(`!W! - ===================== watch error =====================\n`);
-            console.log('!W! - watchError:', watchError);
-            throw watchError;
+            // discard the transaction, because there was a lock - unwatch those key and lock
+            await this.redisClient.unwatchAsync();
+            return {
+                result: 'locked',
+                locked: lock
+            }
+        } else {
+            let setChain = this.redisClient.multi().set(fullKey, raw);
+            if (lock) {
+                var [newChain, lockInstance] = this[LOCK_METHOD](setChain, key, lock);
+                // update the chain
+                setChain = newChain;
+            }
+
+            const result = await setChain.execAsync();
+            if (result === null) {
+                return Promise
+                .delay(SPAN_TRESHOLD)
+                .then(this.save.bind(this,
+                    key,
+                    value,
+                    Object.assign(options, { tries: tries + 1 })
+                    ));
+            }
+
+            return {
+                result,
+                lock: lockInstance
+            }
         }
     }
 
@@ -250,7 +243,6 @@ class SharedObject extends EventEmitter {
         if (keys && keys.length) {
             return this.redisClient.delAsync(keys);
         }
-        // TODO: send notification!
     }
 
     async load(key) {
