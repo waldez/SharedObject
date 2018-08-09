@@ -11,20 +11,78 @@ const META_KEY = 'λ';
 const FULLNAME = Symbol('fullname');
 const LOCKS = Symbol('locks');
 const LOCK_RESOLVE = Symbol('lockResolve');
+const LOCK_METHOD = Symbol('lockFn');
 const LOCK_TIMER = Symbol('lockTimer');
 const SUB_CHANNEL = 'SO:service';
 
+// Private methods to be bound onto private Symbol property
+/**
+ * private SharedObject::lock
+ * @param  {Object} chain
+ * @param  {string} key
+ * @param  {Object} options
+ * @return {Array<>}
+ */
+function lock(chain, key, options = {}) {
+
+    const fullKey = this[FULLNAME] + ':' + META_KEY + ':locks:' + key;
+    const additional = { owner: this[UUID] };
+    let expire;
+
+    if (options.ttl) {
+        const expire = new Date();
+        expire.setSeconds(expire.getSeconds() + options.ttl);
+        additional.expire = expire;
+    }
+
+    const raw = JSON.stringify(Object.assign({}, options, additional));
+    const newChain = chain.set(fullKey, raw, 'NX', 'EX', options.ttl);
+    const lock = {
+        unlock: async result => {
+            if (expire && expire < new Date()) {
+                // already expired, nothing left to do
+                return;
+            } else {
+                // TODO: should I add random number for each lock instance?
+                // Q: could happend, that I'll delete the lock from next command?
+                const delResult = await this.redisClient.delAsync(fullKey);
+                return this.notify({
+                    type: 'unlock',
+                    key,
+                    value: result
+                });
+            }
+        }
+    }
+    return [newChain, lock];
+}
+
 class SharedObject extends EventEmitter {
 
-    constructor(id = 'SO', prefix = null, options = {}) {
+    /**
+     * @param  {string} id
+     * @param  {string} [prefix]
+     * @param  {Object} options
+     * @param  {Object} options.redisClient connected redis client
+     * @param  {Object} options.redisClientSub connected redis client subscribed to service channel
+     * @param  {Object} options.redisClientSubName name of the service channel
+     * @return {SharedObject}
+     */
+    constructor(id, prefix = null, options = {}) {
     
+        if (id === null || typeof id === 'undefined') {
+            throw new ReferenceError('Parameter \'id\' is null or undefined!');
+        }
+
         let {
             redisClient,
             redisClientSub,
             redisClientSubName
         } = options;
+        // everything is
         super();
 
+        this[LOCK_METHOD] = lock.bind(this);
         this[LOCKS] = new Map();
         this[UUID] = uuidv1().toString();
         this[FULLNAME] = ((prefix && prefix + ':') || '') + id;
@@ -56,15 +114,15 @@ class SharedObject extends EventEmitter {
             // first, go through (un)locks
             if (notification.type === 'unlock') {
                 const foundLock = this[LOCKS].get(notification.key);
-                if (foundLock) {
+                if (foundLock && foundLock.locked) {
                     foundLock[LOCK_RESOLVE]('unlocked');
-                    this[LOCKS].delete(notification.key);
                 }
+                this[LOCKS].delete(notification.key);
             }
 
             // If I'm not the sender, process the notification...
             if (notification.sender !== this[UUID]) {
-                this.onNotification(notification);
+                this.emit('notification', notification);
             }
         });
 
@@ -89,55 +147,15 @@ class SharedObject extends EventEmitter {
         return this[FULLNAME];
     }
 
+    /**
+     * Notify other clients wia channel message
+     * @param  {Object} notification
+     * @return {Promise}
+     */
     notify(notification) {
 
         const raw = JSON.stringify(Object.assign({}, notification, { sender: this[UUID] }));
         return this.redisClient.publish(this.redisClientSubName, raw);
-    }
-
-    onNotification(notification) {
-
-        // console.log(`!W! - ===================== NOTIFICATION =====================\n`);
-        // console.log('!W! - notification:', notification);
-    }
-
-    lock(chain, key, options = {}) {
-
-        const fullKey = this[FULLNAME] + ':' + META_KEY + ':locks:' + key;
-        const additional = { owner: this[UUID] };
-        let expire;
-
-        if (options.ttl) {
-            const expire = new Date();
-            expire.setSeconds(expire.getSeconds() + options.ttl);
-            additional.expire = expire;
-        }
-
-        const raw = JSON.stringify(Object.assign({}, options, additional));
-        const newChain = chain.set(fullKey, raw, 'NX', 'EX', options.ttl);
-        const lock = {
-            unlock: async result => {
-                if (expire && expire < new Date()) {
-                    // already expired, nothing left to do
-                    return;
-                } else {
-                    // TODO: should I add random number for each lock instance?
-                    // Q: could happend, that I'll delete the lock from next command?
-                    const delResult = await this.redisClient.delAsync(fullKey);
-                    return this.notify({
-                        type: 'unlock',
-                        key,
-                        value: result
-                    });
-                }
-            }
-        }
-        return [newChain, lock];
-    }
-
-    unlock(key, result) {
-        
-        const fullKey = this[FULLNAME] + ':' + META_KEY + ':locks:' + key;
     }
 
     buildKey(key) {
@@ -165,6 +183,7 @@ class SharedObject extends EventEmitter {
         const SPAN_TRESHOLD = 50;
 
         try {
+            // begin trasaction (watch the key and the lock for this key)
             const watchResult = await this.redisClient.watchAsync(fullKey, fullLockKey);
             const rawLock = await this.redisClient.getAsync(fullLockKey);
             if (rawLock) {
@@ -172,28 +191,31 @@ class SharedObject extends EventEmitter {
                 lockData.expire = new Date(lockData.expire);
 
                 const timeSpan = lockData.expire - new Date();
-                const lock = { options: lockData };
-                const lockPromise = timeSpan > 0 ? new Promise((resolve, reject) => {
-
-                    lock.locked = true;
-                    lock[LOCK_TIMER] = setTimeout(() => {
-                        resolve({ result: 'timeout' });
-                        lock.locked = false;
-                        lock[LOCK_RESOLVE] = ()=>{};
-                    }, timeSpan + SPAN_TRESHOLD);
-
-                    lock[LOCK_RESOLVE] = result => {
-                        clearTimeout(lock[LOCK_TIMER]);
-                        lock[LOCK_TIMER] = null;
-                        locklock[LOCK_RESOLVE] = ()=>{};
-                        resolve({ result });
-                    }
-
-                }) : Promise.resolve({ result: 'timeout' });
+                const lock = {
+                    options: lockData,
+                    locked: false // the lock could be already expired, so the default is false
+                };
+                const lockPromise = timeSpan > 0 ?
+                    // there is still time to live
+                    new Promise((resolve/*, reject*/) => {
+                        lock.locked = true;
+                        lock[LOCK_RESOLVE] = result => {
+                            lock.locked = false;
+                            resolve({ result });
+                        }
+                    }).timeout(timeSpan + SPAN_TRESHOLD)
+                        .catch(Promise.TimeoutError, timeoutError => {
+                            lock.locked = false;
+                            return Promise.resolve({ result: 'timeout' });
+                        }) :
+                    // the time has already expired
+                    Promise.resolve({ result: 'timeout' });
 
                 lock.promise = lockPromise;
-                this[LOCKS].set(key, lock);
-                // unwatch
+                if (lock.locked) {
+                    this[LOCKS].set(key, lock);
+                }
+                // discard the transaction, because there was a lock - unwatch those key and lock
                 await this.redisClient.unwatchAsync();
                 return {
                     result: 'locked',
@@ -202,7 +224,7 @@ class SharedObject extends EventEmitter {
             } else {
                 let setChain = this.redisClient.multi().set(fullKey, raw);
                 if (lock) {
-                    var [newChain, lockInstance] = this.lock(setChain, key, lock);
+                    var [newChain, lockInstance] = this[LOCK_METHOD](setChain, key, lock);
                     // update the chain
                     setChain = newChain;
                 }
