@@ -63,7 +63,7 @@ describe('SharedObjct build on Redis', function() {
         so1 = new SharedObject(SO1_ID, null, { redisClient: client });
     });
 
-    xdescribe('Single process basic functions', function() {
+    describe('Single process basic functions', function() {
         
         it('should save without lock', async function() {
 
