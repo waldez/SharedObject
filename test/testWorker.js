@@ -20,7 +20,7 @@ process.on('message', async ({ requestId, action, args }) => {
 
         default: 
             try {
-                const result = await so[action].apply(so, args);
+                const result = typeof so[action] === 'function' ? await so[action].apply(so, args) : so[action];
                 process.send({ requestId, action, value: result });
             } catch (error) {
                 process.send({ requestId, action, error: true, value: error });

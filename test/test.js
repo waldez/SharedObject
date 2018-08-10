@@ -86,6 +86,18 @@ describe('SharedObjct build on Redis', function() {
             expect(loadResult).to.equal(undefined);
         });
 
+        it('should save with ttl', async function() {
+
+            const data = 'I\'ll be here only second!';
+            expect(await so1.save('key1', data, { ttl: 1 }))
+                .to.deep.equal({ result: [ 'OK' ], lock: undefined });
+
+            expect(await so1.load('key1')).to.equal(data);
+
+            await wait(1000);
+            expect(await so1.load('key1')).to.equal(undefined);
+        });
+
         it('should save with lock and unlock afterwards', async function() {
 
             const firstSaveResult = await so1.save('key1', 'first value with lock', { lock: { ttl: 2 } });
@@ -182,6 +194,41 @@ describe('SharedObjct build on Redis', function() {
             const remoteLoadResult = await remoteSo1.load('key1');
             expect(remoteLoadResult).to.equal('value from remote save');
 
+        });
+
+        it('should fail, because of no save retry allowed and race condition happened', async function() {
+
+            const promises = [];
+            let numOfErrors = 0;
+            promises.push(so1.save('key1', 'value from local save', { maxRetryCount: 0})
+                .then(result => {
+                    expect(result).to.deep.equal({ result: [ 'OK' ], lock: undefined });
+                })
+                .catch(error => numOfErrors++));
+
+
+            promises.push(remoteSo1.save('key1', 'value from remote save', { maxRetryCount: 0})
+                .then(result => {
+                    expect(result).to.deep.equal({ result: [ 'OK' ] });
+                })
+                .catch(error => numOfErrors++));
+
+            await Promise.all(promises);
+            expect(numOfErrors).to.equal(1, `Numer of errors shoud be exactly 1, but is ${numOfErrors}`);
+        });
+    });
+
+    describe('Notifications', function() {
+
+        it('should be sent from remote to local', async function() {
+
+            const sender = await remoteSo1.instanceUUID();
+
+            so1.once('notification', notification => {
+                expect(notification).to.deep.equal(Object.assign({ sender }, FOO_JSON));
+            });
+
+            const notifyResult = await remoteSo1.notify(FOO_JSON);
         });
     });
 

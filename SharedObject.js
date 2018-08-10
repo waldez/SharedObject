@@ -15,8 +15,8 @@ const SUB_CHANNEL = 'SO:service';
 const META_KEY = '__META__';
 
 // this is the timespan, which is used for retry of save and also to offset a bit local timeout timer
-const SPAN_TRESHOLD = 50;
-const MAX_SAVE_TRIES = 5;
+const TIME_SPAN_TRESHOLD = 50;
+const MAX_RETRY_COUNT = 5;
 
 // Private methods to be bound onto private Symbol property
 /**
@@ -80,14 +80,20 @@ class SharedObject extends EventEmitter {
         let {
             redisClient,
             redisClientSub,
-            redisClientSubName
+            redisClientSubName,
+            timespanTreshold,
+            maxRetryCount,
+            uuid
         } = options;
         // everything is
         super();
 
+        this.timespanTreshold = timespanTreshold || TIME_SPAN_TRESHOLD;
+        this.maxRetryCount = maxRetryCount || MAX_RETRY_COUNT;
+
         this[LOCK_METHOD] = lock.bind(this);
         this[LOCKS] = new Map();
-        this[UUID] = uuidv1().toString();
+        this[UUID] = uuid || uuidv1().toString();
         this[FULLNAME] = ((prefix && prefix + ':') || '') + id;
         this.redisClient = redisClient;
 
@@ -109,11 +115,9 @@ class SharedObject extends EventEmitter {
             console.log("CLIENT SUB Error:\n", err);
         });
 
-
         this.redisClientSub.on("message", (channel, message) => {
 
             const notification = JSON.parse(message);
-
             // first, go through (un)locks
             if (notification.type === 'unlock') {
                 const foundLock = this[LOCKS].get(notification.key);
@@ -133,6 +137,11 @@ class SharedObject extends EventEmitter {
     get fullName() {
 
         return this[FULLNAME];
+    }
+
+    get instanceUUID() {
+
+        return this[UUID];
     }
 
     /**
@@ -162,18 +171,32 @@ class SharedObject extends EventEmitter {
         return this[FULLNAME] + ':' + META_KEY + ':locks:' + key;
     }
 
+    /**
+     * Save key-value
+     * @param  {string} key
+     * @param  {*} value
+     * @param  {Object} options
+     * @param  {Object} options.lock if defined, save item will be locked accordingly
+     * @param  {number} options.lock.ttl time to live for the lock
+     * @param  {number} options.ttl time to live for item
+     * @param  {number} options.tries reserved for internal purposes
+     * @param  {number} options.maxRetryCount if race condition happens, this is maximum number of tries
+     *                                        before the function fails. If set to 0 and race condition happens,
+     *                                        the function fail immediately
+     * @return {Promise}
+     */
     async save(key, value, options = {}) {
 
         const raw = JSON.stringify(value);
         const fullKey = this.buildKey(key);
         const fullLockKey = this.buildLockKey(key);
-        const { lock, tries = 0 } = options;
+        const { lock, tries = 0, maxRetryCount = this.maxRetryCount, ttl } = options;
 
-        if (tries >= MAX_SAVE_TRIES) {
+        if (tries > maxRetryCount) {
             throw new Error('Exceeded maximum number of save tries!');
         }
 
-        // begin trasaction (watch the key and the lock for this key)
+        // begin transaction (watch the key and the lock for this key)
         const watchResult = await this.redisClient.watchAsync(fullKey, fullLockKey);
         const rawLock = await this.redisClient.getAsync(fullLockKey);
         if (rawLock) {
@@ -193,7 +216,7 @@ class SharedObject extends EventEmitter {
                         lock.locked = false;
                         resolve({ result });
                     }
-                }).timeout(timeSpan + SPAN_TRESHOLD)
+                }).timeout(timeSpan + this.timespanTreshold)
                     .catch(Promise.TimeoutError, timeoutError => {
                         lock.locked = false;
                         return Promise.resolve({ result: 'timeout' });
@@ -212,7 +235,9 @@ class SharedObject extends EventEmitter {
                 locked: lock
             }
         } else {
-            let setChain = this.redisClient.multi().set(fullKey, raw);
+            let setChain = ttl ?
+                this.redisClient.multi().set(fullKey, raw, 'EX', ttl) :
+                this.redisClient.multi().set(fullKey, raw);
             if (lock) {
                 var [newChain, lockInstance] = this[LOCK_METHOD](setChain, key, lock);
                 // update the chain
@@ -222,7 +247,7 @@ class SharedObject extends EventEmitter {
             const result = await setChain.execAsync();
             if (result === null) {
                 return Promise
-                .delay(SPAN_TRESHOLD)
+                .delay(this.timespanTreshold)
                 .then(this.save.bind(this,
                     key,
                     value,
@@ -245,6 +270,11 @@ class SharedObject extends EventEmitter {
         }
     }
 
+    /**
+     * Load item
+     * @param  {string} key
+     * @return {Promise}
+     */
     async load(key) {
 
         if (!key) {
