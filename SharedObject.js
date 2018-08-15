@@ -1,18 +1,19 @@
-'use strict'
+'use strict';
 
 const EventEmitter = require('events');
 const Promise = require('bluebird');
 const uuidv1 = require('uuid/v1');
 
 const UUID = Symbol('uuid');
-const VALUE = Symbol('value');
 const FULLNAME = Symbol('fullname');
 const LOCKS = Symbol('locks');
 const LOCK_RESOLVE = Symbol('lockResolve');
-const LOCK_METHOD = Symbol('lockFn');
-const LOCK_TIMER = Symbol('lockTimer');
+const LOCK = Symbol('lockFn');
+const GET_LOCK = Symbol('getLockFn');
 const SUB_CHANNEL = 'SO:service';
 const META_KEY = '__META__';
+const META_PREFIX = Symbol('metaPrefix');
+const QUESTIONS = Symbol('questions');
 
 // this is the timespan, which is used for retry of save and also to offset a bit local timeout timer
 const TIME_SPAN_TRESHOLD = 50;
@@ -28,7 +29,7 @@ const MAX_RETRY_COUNT = 5;
  */
 function lock(chain, key, options = {}) {
 
-    const fullKey = this[FULLNAME] + ':' + META_KEY + ':locks:' + key;
+    const fullKey = this.buildLockKey(key);
     const additional = { owner: this[UUID] };
     let expire;
 
@@ -48,7 +49,7 @@ function lock(chain, key, options = {}) {
             } else {
                 // TODO: should I add random number for each lock instance?
                 // Q: could happend, that I'll delete the lock from next command?
-                const delResult = await this.redisClient.delAsync(fullKey);
+                await this.redisClient.delAsync(fullKey);
                 return this.notify({
                     type: 'unlock',
                     key,
@@ -56,8 +57,60 @@ function lock(chain, key, options = {}) {
                 });
             }
         }
-    }
+    };
     return [newChain, lock];
+}
+
+/**
+ * private SharedObject::getLock
+ * @param  {Object} lockData
+ * @return {Object}
+ */
+function getLock(lockData) {
+
+    lockData.expire = new Date(lockData.expire);
+    const timeSpan = lockData.expire - new Date();
+    const lock = {
+        options: lockData,
+        locked: false // the lock could be already expired, so the default is false
+    };
+    const lockPromise = timeSpan > 0 ?
+        // there is still time to live
+        new Promise((resolve/*, reject*/) => {
+            lock.locked = true;
+            lock[LOCK_RESOLVE] = result => {
+                lock.locked = false;
+                resolve({ result });
+            };
+        }).timeout(timeSpan + this.timespanTreshold)
+            .catch(Promise.TimeoutError, timeoutError => {
+                lock.locked = false;
+                return Promise.resolve({ result: 'timeout' });
+            }) :
+        // the time has already expired
+        Promise.resolve({ result: 'timeout' });
+
+    lock.promise = lockPromise;
+    return lock;
+}
+
+/**
+ * private helper - counts connected SharedObject instances
+ * @param  {string} clientsString result of command CLIENTS LIST
+ * @param  {string} namePrefix the id of SharedObject
+ * @return {number}
+ */
+function countClients(clientsString, namePrefix) {
+
+    let count = 0;
+    let lastIndex = 0;
+
+    while (~(lastIndex = clientsString.indexOf(namePrefix, lastIndex))) {
+        count++;
+        lastIndex++;
+    }
+
+    return count;
 }
 
 class SharedObject extends EventEmitter {
@@ -72,7 +125,7 @@ class SharedObject extends EventEmitter {
      * @return {SharedObject}
      */
     constructor(id, prefix = null, options = {}) {
-    
+
         if (id === null || typeof id === 'undefined') {
             throw new ReferenceError('Parameter \'id\' is null or undefined!');
         }
@@ -91,10 +144,13 @@ class SharedObject extends EventEmitter {
         this.timespanTreshold = timespanTreshold || TIME_SPAN_TRESHOLD;
         this.maxRetryCount = maxRetryCount || MAX_RETRY_COUNT;
 
-        this[LOCK_METHOD] = lock.bind(this);
+        this[QUESTIONS] = new Map();
+        this[LOCK] = lock.bind(this);
+        this[GET_LOCK] = getLock.bind(this);
         this[LOCKS] = new Map();
         this[UUID] = uuid || uuidv1().toString();
         this[FULLNAME] = ((prefix && prefix + ':') || '') + id;
+        this[META_PREFIX] = this[FULLNAME] + ':' + META_KEY + ':';
         this.redisClient = redisClient;
 
         if (!redisClientSub || !redisClientSubName) {
@@ -107,15 +163,15 @@ class SharedObject extends EventEmitter {
         this.redisClientSubName = redisClientSubName;
 
         // TODO:
-        this.redisClient.on("error", function (err) {
-            console.log("CLIENT Error:\n", err);
+        this.redisClient.on('error', function(err) {
+            console.log('CLIENT Error:\n', err);
         });
 
-        this.redisClientSub.on("error", function (err) {
-            console.log("CLIENT SUB Error:\n", err);
+        this.redisClientSub.on('error', function(err) {
+            console.log('CLIENT SUB Error:\n', err);
         });
 
-        this.redisClientSub.on("message", (channel, message) => {
+        this.redisClientSub.on('message', (channel, message) => {
 
             const notification = JSON.parse(message);
             // first, go through (un)locks
@@ -127,11 +183,50 @@ class SharedObject extends EventEmitter {
                 this[LOCKS].delete(notification.key);
             }
 
-            // If I'm not the sender, process the notification...
-            if (notification.sender !== this[UUID]) {
+            if (notification.type === 'question' && notification.sender !== this[UUID]) {
+
+                let unanswered = this.listenerCount('question');
+                const answers = [];
+
+                const question = notification;
+                question.answer = (data) => {
+                    answers.push(data);
+                    unanswered--;
+                    if (unanswered === 0) {
+                        this.notify({
+                            qid: notification.qid,
+                            type: 'answer',
+                            expectedAnswers: notification.expectedAnswers,
+                            answer: answers.length === 1 ? answers[0] : answers
+                        });
+                    }
+                };
+
+                this.emit('question', question);
+                return;
+            }
+
+            if (notification.type === 'answer' && notification.sender !== this[UUID]) {
+                const foundQuestion = this[QUESTIONS].get(notification.qid);
+                if (foundQuestion) {
+                    foundQuestion.answers = foundQuestion.answers || [];
+                    foundQuestion.answers.push(notification);
+                    if (foundQuestion.answers.length === notification.expectedAnswers) {
+                        this[QUESTIONS].delete(notification.qid);
+                        foundQuestion.resolve(foundQuestion.answers);
+                    }
+                }
+                return;
+            }
+
+
+            if (notification.notifySender || notification.sender !== this[UUID]) {
                 this.emit('notification', notification);
             }
         });
+
+        // sets the name of redis client to this instance id, so we will be able to track instances with same id
+        this.redisClient.clientAsync('setname', this[FULLNAME]).catch(error => { throw error; });
     }
 
     get fullName() {
@@ -149,26 +244,83 @@ class SharedObject extends EventEmitter {
      * @param  {Object} notification
      * @return {Promise}
      */
-    notify(notification) {
+    notify(notification, options = {}) {
 
-        const raw = JSON.stringify(Object.assign({}, notification, { sender: this[UUID] }));
+        const { notifySender } = options;
+        const raw = JSON.stringify(Object.assign({}, notification, { sender: this[UUID], notifySender }));
         return this.redisClient.publish(this.redisClientSubName, raw);
     }
+
+    /**
+     * Ask other SharedObject instances
+     * @return {Promise<Array<Object>>} array of replies from other instances
+     */
+    async ask(question) {
+
+        const promise = new Promise(async(resolve, reject) => {
+            const clients = await this.redisClient.clientAsync('list');
+            const otherClientsCount = countClients(clients, this[FULLNAME]) - 1;
+
+            const qid = uuidv1().toString();
+            const json = {
+                qid,
+                type: 'question',
+                question,
+                expectedAnswers: otherClientsCount
+            };
+
+            this[QUESTIONS].set(qid, { resolve, reject, qid });
+            await this.notify(json);
+        }).timeout(5000 /*TODO: rozmyslet*/);
+
+        return promise;
+    }
+
 
     buildKey(key) {
 
         if (!key) {
-            throw new Error(`Save failed! No key specified!`);
+            throw new Error('Save failed! No key specified!');
         }
         return this[FULLNAME] + ':' + key;
     }
-    
+
     buildLockKey(key) {
 
         if (!key) {
-            throw new Error(`Save failed! No key specified!`);
+            throw new Error('Save failed! No key specified!');
         }
-        return this[FULLNAME] + ':' + META_KEY + ':locks:' + key;
+        return this[META_PREFIX] + ':locks:' + key;
+    }
+
+    /**
+     * Gets the Lock object, even if the key isn't locked.
+     * @param  {[type]} key [description]
+     * @return {[type]}     [description]
+     */
+    async getLock(key) {
+
+        const foundLock = this[LOCKS].get(key);
+        if (foundLock) {
+            return foundLock;
+        }
+
+        const fullLockKey = this.buildLockKey(key);
+        const rawLock = await this.redisClient.getAsync(fullLockKey);
+        if (rawLock) {
+            const lockData = JSON.parse(rawLock);
+            const lock = this[GET_LOCK](lockData);
+            if (lock.locked) {
+                this[LOCKS].set(key, lock);
+            }
+            return lock;
+        }
+
+        return {
+            options: null,
+            promise: Promise.resolve(),
+            locked: false // not locked
+        };
     }
 
     /**
@@ -197,34 +349,11 @@ class SharedObject extends EventEmitter {
         }
 
         // begin transaction (watch the key and the lock for this key)
-        const watchResult = await this.redisClient.watchAsync(fullKey, fullLockKey);
+        await this.redisClient.watchAsync(fullKey, fullLockKey);
         const rawLock = await this.redisClient.getAsync(fullLockKey);
         if (rawLock) {
             const lockData = JSON.parse(rawLock);
-            lockData.expire = new Date(lockData.expire);
-
-            const timeSpan = lockData.expire - new Date();
-            const lock = {
-                options: lockData,
-                locked: false // the lock could be already expired, so the default is false
-            };
-            const lockPromise = timeSpan > 0 ?
-                // there is still time to live
-                new Promise((resolve/*, reject*/) => {
-                    lock.locked = true;
-                    lock[LOCK_RESOLVE] = result => {
-                        lock.locked = false;
-                        resolve({ result });
-                    }
-                }).timeout(timeSpan + this.timespanTreshold)
-                    .catch(Promise.TimeoutError, timeoutError => {
-                        lock.locked = false;
-                        return Promise.resolve({ result: 'timeout' });
-                    }) :
-                // the time has already expired
-                Promise.resolve({ result: 'timeout' });
-
-            lock.promise = lockPromise;
+            const lock = this[GET_LOCK](lockData);
             if (lock.locked) {
                 this[LOCKS].set(key, lock);
             }
@@ -233,13 +362,13 @@ class SharedObject extends EventEmitter {
             return {
                 result: 'locked',
                 locked: lock
-            }
+            };
         } else {
             let setChain = ttl ?
                 this.redisClient.multi().set(fullKey, raw, 'EX', ttl) :
                 this.redisClient.multi().set(fullKey, raw);
             if (lock) {
-                var [newChain, lockInstance] = this[LOCK_METHOD](setChain, key, lock);
+                var [newChain, lockInstance] = this[LOCK](setChain, key, lock);
                 // update the chain
                 setChain = newChain;
             }
@@ -247,18 +376,18 @@ class SharedObject extends EventEmitter {
             const result = await setChain.execAsync();
             if (result === null) {
                 return Promise
-                .delay(this.timespanTreshold)
-                .then(this.save.bind(this,
-                    key,
-                    value,
-                    Object.assign(options, { tries: tries + 1 })
+                    .delay(this.timespanTreshold)
+                    .then(this.save.bind(this,
+                        key,
+                        value,
+                        Object.assign(options, { tries: tries + 1 })
                     ));
             }
 
             return {
                 result,
                 lock: lockInstance
-            }
+            };
         }
     }
 
@@ -278,12 +407,12 @@ class SharedObject extends EventEmitter {
     async load(key) {
 
         if (!key) {
-            throw new Error(`Load failed! No key specified!`);
+            throw new Error('Load failed! No key specified!');
         }
 
         key = this[FULLNAME] + ':' + key;
         const rawValue = await this.redisClient.getAsync(key);
-        
+
         if (!rawValue) {
             return void 0;
         }

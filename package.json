@@ -4,7 +4,7 @@
   "description": "",
   "main": "SharedObject.js",
   "scripts": {
-    "test": "mocha test --timeout ${MOCHA_TIMEOUT=10000} test/test.js"
+    "test": "mocha test --timeout ${MOCHA_TIMEOUT=10000} test/unit/SharedObject.js"
   },
   "author": "Tomas Waldauf <tomas.waldauf@gmail.com>",
   "dependencies": {
